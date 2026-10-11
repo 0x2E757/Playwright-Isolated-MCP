@@ -1,6 +1,6 @@
 {
-  "name": "playwright-isolated-local",
+  "name": "playwright-isolated",
   "owner": { "name": "0x2E757" },
-  "metadata": { "description": "Local marketplace for the playwright-isolated plugin." },
+  "metadata": { "description": "Marketplace for the playwright-isolated plugin." },
   "plugins": [ { "name": "playwright-isolated", "source": "./plugins/playwright-isolated", "description": "Playwright MCP for multi-agent Claude Code: isolated browser context per agent, guaranteed cleanup, human-paced limits." } ]
 }

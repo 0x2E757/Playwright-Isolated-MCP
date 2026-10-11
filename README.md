@@ -36,17 +36,28 @@ extends it: every agent is isolated from every other agent. Tool names: `mcp__pl
 
 ## Install
 
+Requires Node.js and Google Chrome (no browser is downloaded).
+
 ```bash
-git clone https://github.com/0x2E757/Playwright-Isolated-MCP.git
-cd Playwright-Isolated-MCP/plugins/playwright-isolated && npm ci && cd ../..   # no browser download: uses the installed Google Chrome
-claude plugin marketplace add <absolute path of the Playwright-Isolated-MCP clone>
-claude plugin install playwright-isolated@playwright-isolated-local
+claude plugin marketplace add 0x2E757/Playwright-Isolated-MCP
+claude plugin install playwright-isolated@playwright-isolated
 ```
 
-## Setup (development)
+Claude Code copies the plugin into its cache and installs the npm dependency from the committed lockfile
+(exact versions, install scripts disabled).
+
+## Development
+
+A marketplace added from a local folder is loaded in place (edits apply from the next session), and its
+dependencies are not installed automatically:
 
 ```bash
-claude --plugin-dir /path/to/Playwright-Isolated-MCP/plugins/playwright-isolated
+git clone https://github.com/0x2E757/Playwright-Isolated-MCP.git
+cd Playwright-Isolated-MCP/plugins/playwright-isolated && npm ci
+claude plugin marketplace add <absolute path of the clone>
+claude plugin install playwright-isolated@playwright-isolated
+# or for one session only:
+claude --plugin-dir <clone>/plugins/playwright-isolated
 ```
 
 Environment: `PLAYWRIGHT_ISOLATED_HEADED=1` shows the browser window; `PLAYWRIGHT_ISOLATED_VIEWPORT=WIDTHxHEIGHT` changes the viewport
