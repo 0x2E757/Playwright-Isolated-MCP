@@ -1,0 +1,6 @@
+{
+  "name": "playwright-isolated",
+  "version": "0.3.0",
+  "description": "Playwright MCP for multi-agent Claude Code: the @playwright/mcp engine with an isolated browser context for every agent (main and each subagent), guaranteed browser cleanup, and human-paced limits.",
+  "author": { "name": "0x2E757" }
+}

@@ -1,0 +1,10 @@
+{
+  "hooks": {
+    "PreToolUse": [
+      { "matcher": "mcp__plugin_playwright[-_]isolated_playwright__.*", "hooks": [ { "type": "command", "command": "node", "args": ["${CLAUDE_PLUGIN_ROOT}/hooks/hook.mjs", "PreToolUse"], "timeout": 10 } ] }
+    ],
+    "SubagentStop": [
+      { "hooks": [ { "type": "command", "command": "node", "args": ["${CLAUDE_PLUGIN_ROOT}/hooks/hook.mjs", "SubagentStop"], "timeout": 15 } ] }
+    ]
+  }
+}

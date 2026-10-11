@@ -1,0 +1,9 @@
+{
+  "name": "playwright-isolated",
+  "private": true,
+  "type": "module",
+  "description": "Multi-agent wrapper around @playwright/mcp for Claude Code.",
+  "dependencies": {
+    "@playwright/mcp": "0.0.83"
+  }
+}
