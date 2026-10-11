@@ -8,7 +8,11 @@
 //   at CALL_LIMIT_MS, and browser_wait_for is limited to WAIT_LIMIT_S.
 // - Cleanup: SubagentStop closes the subagent's context (via a named pipe); when Claude Code goes away
 //   (stdin closes) the browser is closed; if this process dies, Windows kills Chrome with it.
+// - Output files go under PLAYWRIGHT_ISOLATED_OUTPUT_DIR when it is set, with a session.md brief (see outputConfig).
+import fs from 'node:fs';
+import { createRequire } from 'node:module';
 import net from 'node:net';
+import path from 'node:path';
 import readline from 'node:readline';
 import { createConnection } from '@playwright/mcp';
 import { chromium } from 'playwright';
@@ -25,8 +29,8 @@ const [VIEWPORT_W, VIEWPORT_H] = (/^(\d+)x(\d+)$/.exec(process.env.PLAYWRIGHT_IS
 const log = (...a) => process.stderr.write(`[playwright-isolated] ${a.join(' ')}\n`);
 
 // --- embedded engine: an in-memory MCP client per agent ---------------------------------------------
-async function connectEngine(contextGetter) {
-  const server = await createConnection(ENGINE_CONFIG, contextGetter);
+async function connectEngine(contextGetter, extraConfig = {}) {
+  const server = await createConnection({ ...ENGINE_CONFIG, ...extraConfig }, contextGetter);
   const pending = new Map();
   let nextId = 1;
   const transport = {
@@ -74,12 +78,71 @@ function getBrowser() {
   return browserPromise;
 }
 
-function agentFor(id) {
+// --- output files ---------------------------------------------------------------------------------------
+// Where the engine writes auto-named files (snapshots, console logs, screenshots without a file name).
+// With PLAYWRIGHT_ISOLATED_OUTPUT_DIR set: <root>/<YYYY-MM-DD>--playwright-isolated-<session>/<agent>
+// (dated per-session folders, like the sessio plugin's), absolute paths in tool results, and a session.md
+// brief in the session folder. Unset: the engine's default, .playwright-mcp in the working directory.
+const OUTPUT_ROOT = (process.env.PLAYWRIGHT_ISOLATED_OUTPUT_DIR ?? '').trim();
+const safeName = (s) => String(s ?? '').replace(/[^0-9a-zA-Z-]/g, '');
+let sessionDir = null; // fixed at the session's first call, so agents started after midnight stay in it
+
+function timestamp(d = new Date()) {
+  const p = (n) => String(n).padStart(2, '0');
+  const off = -d.getTimezoneOffset();
+  const zone = `${off >= 0 ? '+' : '-'}${p(Math.floor(Math.abs(off) / 60))}:${p(Math.abs(off) % 60)}`;
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())} ${zone}`;
+}
+
+function versions() {
+  const read = (file) => { try { return JSON.parse(fs.readFileSync(file, 'utf8')).version; } catch { return '?'; } };
+  return {
+    plugin: read(new URL('../.claude-plugin/plugin.json', import.meta.url)),
+    engine: read(createRequire(import.meta.url).resolve('@playwright/mcp/package.json')),
+  };
+}
+
+/** The session folder, created with its session.md brief at the first call; null without an output root. */
+function sessionFolder(meta) {
+  if (!OUTPUT_ROOT) return null;
+  if (!sessionDir) {
+    const date = new Date().toISOString().slice(0, 10);
+    sessionDir = path.join(OUTPUT_ROOT, `${date}--playwright-isolated-${safeName(meta.session).slice(0, 8) || 'session'}`);
+    const v = versions();
+    try {
+      fs.mkdirSync(sessionDir, { recursive: true });
+      fs.writeFileSync(path.join(sessionDir, 'session.md'), [
+        '# playwright-isolated session',
+        `- Session: ${meta.session ?? '?'}`,
+        `- Working directory: ${meta.cwd ?? process.cwd()}`,
+        ...(meta.transcript ? [`- Transcript: ${meta.transcript}`] : []),
+        `- Started: ${timestamp()}`,
+        `- Plugin: playwright-isolated ${v.plugin}, engine @playwright/mcp ${v.engine}`,
+        '',
+        '## Agents',
+        '',
+      ].join('\n'));
+    } catch (e) { log('cannot write session brief:', e.message); }
+  }
+  return sessionDir;
+}
+
+function outputConfig(agentId, meta) {
+  const dir = sessionFolder(meta);
+  if (!dir) return {};
+  try {
+    fs.appendFileSync(path.join(dir, 'session.md'),
+      `- ${timestamp().slice(11, 19)} ${agentId}${meta.agentType ? ` (${meta.agentType})` : ''}\n`);
+  } catch (e) { log('cannot update session brief:', e.message); }
+  return { outputDir: path.join(dir, safeName(agentId) || 'agent'), filePaths: 'absolute' };
+}
+
+function agentFor(id, meta) {
   if (!agents.has(id)) {
     const agent = { queue: Promise.resolve() };
     agent.ready = (async () => {
       agent.context = await (await getBrowser()).newContext({ viewport: { width: VIEWPORT_W, height: VIEWPORT_H } });
-      agent.engine = await connectEngine(async () => agent.context);
+      agent.engine = await connectEngine(async () => agent.context, outputConfig(id, meta));
     })();
     agents.set(id, agent);
   }
@@ -111,7 +174,8 @@ function listTools() {
 
 async function callTool(params) {
   const { name } = params;
-  const { _agent: agentId, _session: session, ...args } = params.arguments ?? {};
+  const { _agent: agentId, _session: session, _agent_type: agentType, _cwd: cwd, _transcript: transcript, ...args } =
+    params.arguments ?? {};
   if (!agentId) return errorResult('playwright-isolated refused the call: no agent tag (the playwright-isolated plugin hook is not active).');
   if (HIDDEN_TOOLS.has(name)) return errorResult(`${name} is not available.`);
   if (name === 'browser_wait_for' && Number(args.time) > WAIT_LIMIT_S) {
@@ -119,7 +183,7 @@ async function callTool(params) {
   }
   if (session) startControlPipe(session);
 
-  const agent = agentFor(agentId);
+  const agent = agentFor(agentId, { session, agentType, cwd, transcript });
   // One call at a time per agent; different agents run in parallel.
   const run = agent.queue.then(async () => {
     await agent.ready;
@@ -185,7 +249,7 @@ async function handle({ id, method, params }) {
       return send({ jsonrpc: '2.0', id, result: {
         protocolVersion: params?.protocolVersion ?? '2025-06-18',
         capabilities: { tools: {} },
-        serverInfo: { name: 'playwright-isolated', version: '0.3.0' },
+        serverInfo: { name: 'playwright-isolated', version: '0.4.0' },
       } });
     }
     if (method === 'tools/list') return send({ jsonrpc: '2.0', id, result: { tools: await listTools() } });

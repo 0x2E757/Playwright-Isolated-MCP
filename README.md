@@ -13,8 +13,16 @@ The official `@playwright/mcp` engine (pinned `0.0.83`), wrapped so that it is s
 - **Hidden tool.** `browser_run_code_unsafe` is not offered: it runs arbitrary code inside the server process
   ("RCE-equivalent" per its own description), where it could reach other agents' contexts and bypass the limits.
 
-Everything else — tool set, tool descriptions, responses, snapshots (saved under `.playwright-mcp/` in the
-working directory) — is the engine's own behaviour. The server launches Chrome itself (one browser, a context
+- **Output files out of your projects.** With `PLAYWRIGHT_ISOLATED_OUTPUT_DIR` set, the files the engine writes
+  on its own — page snapshots, console logs, screenshots without a file name — go to
+  `<PLAYWRIGHT_ISOLATED_OUTPUT_DIR>/<YYYY-MM-DD>--playwright-isolated-<session>/<agent>/` (one dated folder per
+  session, like the [sessio](https://github.com/0x2E757/Omnium) plugin's scratch folders) and tool results link
+  them by absolute path. The session folder also gets a `session.md` brief — session id, working directory,
+  transcript path, start time, plugin and engine versions — with one line per agent as it starts using the browser.
+  Unset: the engine's default, `.playwright-mcp/` in the working directory. Files an agent saves under an explicit
+  name are resolved against the working directory either way (engine behaviour).
+
+Everything else — tool set, tool descriptions, responses — is the engine's own behaviour. The server launches Chrome itself (one browser, a context
 per agent) but with the engine's own isolated-mode launch options (Chrome sandbox on,
 `--disable-blink-features=AutomationControlled`); `tests/parity.test.mjs` checks that the Chrome command line and
 the page-visible browser properties match the official server's. Deliberate difference: Full HD viewport.
@@ -60,5 +68,12 @@ claude plugin install playwright-isolated@playwright-isolated
 claude --plugin-dir <clone>/plugins/playwright-isolated
 ```
 
-Environment: `PLAYWRIGHT_ISOLATED_HEADED=1` shows the browser window; `PLAYWRIGHT_ISOLATED_VIEWPORT=WIDTHxHEIGHT` changes the viewport
-(default `1920x1080`, Full HD; Playwright's own default is 1280x720).
+## Settings
+
+Environment variables, e.g. in the `env` block of Claude Code's `settings.json`:
+
+| Variable | Effect |
+|---|---|
+| `PLAYWRIGHT_ISOLATED_OUTPUT_DIR` | Root folder for output files (see above). Unset: `.playwright-mcp/` in the working directory. |
+| `PLAYWRIGHT_ISOLATED_VIEWPORT` | `WIDTHxHEIGHT`; default `1920x1080` (Full HD; Playwright's own default is 1280x720). |
+| `PLAYWRIGHT_ISOLATED_HEADED` | `1` shows the browser window. |

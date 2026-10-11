@@ -13,7 +13,15 @@ process.stdin.on('end', async () => {
   try {
     const data = JSON.parse(raw || '{}');
     if (event === 'PreToolUse') {
-      const updatedInput = { ...(data.tool_input ?? {}), _agent: data.agent_id || 'main', _session: data.session_id };
+      const updatedInput = {
+        ...(data.tool_input ?? {}),
+        _agent: data.agent_id || 'main',
+        _session: data.session_id,
+        // for the session.md brief (written only when PLAYWRIGHT_ISOLATED_OUTPUT_DIR is set)
+        _agent_type: data.agent_type,
+        _cwd: data.cwd,
+        _transcript: data.transcript_path,
+      };
       process.stdout.write(JSON.stringify({ hookSpecificOutput: { hookEventName: 'PreToolUse', updatedInput } }));
     } else if (event === 'SubagentStop' && data.agent_id && data.session_id) {
       await closeAgent(data.session_id, data.agent_id);

@@ -4,9 +4,16 @@ import assert from 'node:assert/strict';
 import { spawn, execFileSync } from 'node:child_process';
 import readline from 'node:readline';
 import { fileURLToPath } from 'node:url';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 
 const root = fileURLToPath(new URL('../plugins/playwright-isolated/', import.meta.url));
-const srv = spawn(process.execPath, [`${root}server/server.mjs`], { stdio: ['pipe', 'pipe', 'ignore'] });
+const scratch = fs.mkdtempSync(path.join(os.tmpdir(), 'pw-isolated-test-')); // the output root under test
+const srv = spawn(process.execPath, [`${root}server/server.mjs`], {
+  stdio: ['pipe', 'pipe', 'ignore'],
+  env: { ...process.env, PLAYWRIGHT_ISOLATED_OUTPUT_DIR: scratch },
+});
 const pending = new Map();
 let nextId = 1;
 readline.createInterface({ input: srv.stdout }).on('line', (l) => { const m = JSON.parse(l); pending.get(m.id)?.(m); });
@@ -17,7 +24,11 @@ const call = async (agent, name, args = {}) => {
   return { text: r.content.map((c) => c.text ?? '').join('\n'), isError: Boolean(r.isError) };
 };
 const exited = new Promise((r) => srv.on('exit', r));
-after(async () => { srv.stdin.end(); await exited; });
+after(async () => {
+  srv.stdin.end();
+  await exited;
+  fs.rmSync(scratch, { recursive: true, force: true });
+});
 
 await rpc('initialize', { protocolVersion: '2025-06-18', capabilities: {}, clientInfo: { name: 'test', version: '0' } });
 
@@ -47,4 +58,22 @@ test('agents have isolated contexts; SubagentStop closes a subagent context', as
   const tabs = await call('sub', 'browser_tabs', { action: 'list' });
   assert.doesNotMatch(tabs.text, /example\.com/); // a fresh context
   assert.match((await call('main', 'browser_evaluate', { function: get })).text, /"main"/); // main untouched
+});
+
+test('with PLAYWRIGHT_ISOLATED_OUTPUT_DIR, output files go to <root>/<date>--playwright-isolated-<session>/<agent>', async () => {
+  const nav = await call('main', 'browser_navigate', { url: 'https://example.com' }); // saves a snapshot file
+  const date = new Date().toISOString().slice(0, 10);
+  const dir = path.join(scratch, `${date}--playwright-isolated-${SESSION.replace(/[^0-9a-zA-Z-]/g, '').slice(0, 8)}`, 'main');
+  assert.ok(fs.readdirSync(dir).some((f) => f.endsWith('.yml')), `no snapshot file in ${dir}`);
+  assert.ok(nav.text.includes(dir), 'tool results link files by absolute path');
+  assert.ok(!fs.existsSync(path.join(process.cwd(), '.playwright-mcp')), 'nothing written into the working directory');
+});
+
+test('the session folder has a session.md brief listing the session and its agents', () => {
+  const date = new Date().toISOString().slice(0, 10);
+  const brief = fs.readFileSync(path.join(scratch, `${date}--playwright-isolated-${SESSION.replace(/[^0-9a-zA-Z-]/g, '').slice(0, 8)}`, 'session.md'), 'utf8');
+  assert.match(brief, new RegExp(`^- Session: ${SESSION}$`, 'm'));
+  assert.match(brief, /^- Working directory: .+$/m);
+  assert.match(brief, /^- Plugin: playwright-isolated \d+\.\d+\.\d+, engine @playwright\/mcp \d+\.\d+\.\d+$/m);
+  assert.match(brief, /^## Agents\n- \d\d:\d\d:\d\d main\n- \d\d:\d\d:\d\d sub\n/m);
 });

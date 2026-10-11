@@ -9,7 +9,9 @@ import { fileURLToPath } from 'node:url';
 const root = fileURLToPath(new URL('../plugins/playwright-isolated/', import.meta.url));
 
 async function start(args, tagged) {
-  const srv = spawn(process.execPath, args, { stdio: ['pipe', 'pipe', 'ignore'], cwd: process.env.TEMP });
+  const env = { ...process.env };
+  delete env.PLAYWRIGHT_ISOLATED_OUTPUT_DIR; // compare both servers with the engine's default output location
+  const srv = spawn(process.execPath, args, { stdio: ['pipe', 'pipe', 'ignore'], cwd: process.env.TEMP, env });
   const pending = new Map();
   let id = 1;
   readline.createInterface({ input: srv.stdout }).on('line', (l) => { const m = JSON.parse(l); pending.get(m.id)?.(m); });
