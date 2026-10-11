@@ -5,7 +5,7 @@
 //   with _agent / _session; untagged calls are refused, since without the tag there is no isolation.
 // - Engine tools and responses are passed through unchanged, except: browser_run_code_unsafe is hidden
 //   (it runs arbitrary code in this process and could reach other agents' contexts), every call is capped
-//   at CALL_LIMIT_MS, and browser_wait_for is limited to WAIT_LIMIT_S.
+//   at CALL_LIMIT_MS (see recoverTabs), and browser_wait_for is limited to WAIT_LIMIT_S.
 // - Cleanup: SubagentStop closes the subagent's context (via a named pipe); when Claude Code goes away
 //   (stdin closes) the browser is closed; if this process dies, Windows kills Chrome with it.
 // - Output files go under PLAYWRIGHT_ISOLATED_OUTPUT_DIR when it is set, with a session.md brief (see outputConfig).
@@ -20,6 +20,7 @@ import { pipeName } from './ipc.mjs';
 
 const CALL_LIMIT_MS = 60_000;
 const WAIT_LIMIT_S = 30;
+const RESPOND_MS = 2_000; // a tab that does not run `1` within this is stuck
 const ENGINE_CONFIG = { timeouts: { navigation: 45_000 } }; // navigation fails before the call limit
 const HIDDEN_TOOLS = new Set(['browser_run_code_unsafe']);
 const HEADLESS = process.env.PLAYWRIGHT_ISOLATED_HEADED !== '1';
@@ -137,11 +138,56 @@ function outputConfig(agentId, meta) {
   return { outputDir: path.join(dir, safeName(agentId) || 'agent'), filePaths: 'absolute' };
 }
 
+// --- call limit: recover the agent's tabs instead of closing them ---------------------------------------
+// A CDP session per tab, attached when the tab opens: a tab whose page is stuck no longer accepts a new one.
+const cdpSessions = new WeakMap(); // page -> Promise<CDPSession | null>
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+function watchTabs(context) {
+  context.on('page', (page) => cdpSessions.set(page, context.newCDPSession(page).catch(() => null)));
+}
+
+async function responds(page) {
+  const cdp = await cdpSessions.get(page);
+  const probe = cdp ? cdp.send('Runtime.evaluate', { expression: '1' }) : page.evaluate('1');
+  return Promise.race([probe.then(() => true, () => false), sleep(RESPOND_MS).then(() => false)]);
+}
+
+/**
+ * After a call ran over the limit (it is no longer awaited and may still finish in the background), check each
+ * of the agent's tabs: a responsive tab is left alone; a stuck page (JavaScript busy, e.g. an endless loop) gets
+ * its running script interrupted; a tab still stuck after that is closed. Only stuck tabs are touched.
+ */
+async function recoverTabs(agent) {
+  const interrupted = [];
+  const closed = [];
+  await Promise.all((agent.context?.pages() ?? []).map(async (page) => {
+    if (await responds(page)) return;
+    const url = page.url();
+    await (await cdpSessions.get(page))?.send('Runtime.terminateExecution').catch(() => {});
+    if (await responds(page)) return interrupted.push(url);
+    closed.push(url);
+    await Promise.race([page.close().catch(() => {}), sleep(5_000)]);
+  }));
+  return { interrupted, closed, left: agent.context?.pages().length ?? 0 };
+}
+
+function overLimitResult({ interrupted, closed, left }) {
+  const list = (urls) => urls.map((u) => u || 'about:blank').join(', ');
+  return errorResult([
+    `This call did not finish within the ${CALL_LIMIT_MS / 1000}s limit. It is no longer awaited and may still finish in the background.`,
+    interrupted.length ? `The page's JavaScript was stuck and was interrupted (the tab is kept): ${list(interrupted)}.` : '',
+    closed.length ? `Tabs that stayed unresponsive were closed (cookies, logins and other tabs are kept): ${list(closed)}.` : '',
+    left ? 'Take a snapshot to see the current state, then continue in shorter steps.' : 'Navigate again and continue in shorter steps.',
+  ].filter(Boolean).join(' '));
+}
+
 function agentFor(id, meta) {
   if (!agents.has(id)) {
     const agent = { queue: Promise.resolve() };
     agent.ready = (async () => {
       agent.context = await (await getBrowser()).newContext({ viewport: { width: VIEWPORT_W, height: VIEWPORT_H } });
+      watchTabs(agent.context);
       agent.engine = await connectEngine(async () => agent.context, outputConfig(id, meta));
     })();
     agents.set(id, agent);
@@ -184,26 +230,29 @@ async function callTool(params) {
   if (session) startControlPipe(session);
 
   const agent = agentFor(agentId, { session, agentType, cwd, transcript });
-  // One call at a time per agent; different agents run in parallel.
-  const run = agent.queue.then(async () => {
-    await agent.ready;
-    const res = await agent.engine.request('tools/call', { name, arguments: args });
-    if (name === 'browser_close') await closeAgent(agentId);
-    return res.error ? errorResult(res.error.message) : res.result;
+  // One call at a time per agent; different agents run in parallel. The limit counts from the start of the
+  // call (not its time in the queue); a call over it is no longer awaited, which frees the agent's queue.
+  const run = agent.queue.then(() => {
+    const call = (async () => {
+      await agent.ready;
+      const res = await agent.engine.request('tools/call', { name, arguments: args });
+      if (name === 'browser_close') await closeAgent(agentId);
+      return res.error ? errorResult(res.error.message) : res.result;
+    })().catch((e) => errorResult(e.message));
+    let timer;
+    let overLimit = false;
+    const limit = new Promise((resolve) => {
+      timer = setTimeout(() => {
+        overLimit = true;
+        recoverTabs(agent).then((r) => resolve(overLimitResult(r)));
+      }, CALL_LIMIT_MS);
+    });
+    // Once over the limit, the answer is the limit's: recovery itself can end the call (an interrupted script
+    // fails it), and that error must not win the race.
+    return Promise.race([call.then((r) => (overLimit ? limit : r)), limit]).finally(() => clearTimeout(timer));
   });
   agent.queue = run.catch(() => {});
-  let timer;
-  const limit = new Promise((resolve) => {
-    timer = setTimeout(async () => {
-      // Stop the runaway call: closing the agent's tabs aborts it (and frees the agent's queue);
-      // the context, with its cookies, logins and cart, stays.
-      await Promise.all((agent.context?.pages() ?? []).map((p) => p.close().catch(() => {})));
-      resolve(errorResult(
-        `This call took longer than the ${CALL_LIMIT_MS / 1000}s limit and was stopped by closing your tabs ` +
-        '(cookies, logins and cart are kept). Navigate again and continue in shorter steps.'));
-    }, CALL_LIMIT_MS);
-  });
-  return Promise.race([run.catch((e) => errorResult(e.message)), limit]).finally(() => clearTimeout(timer));
+  return run;
 }
 
 // --- control pipe: SubagentStop hook -> close that agent's context ---------------------------------------
@@ -249,7 +298,7 @@ async function handle({ id, method, params }) {
       return send({ jsonrpc: '2.0', id, result: {
         protocolVersion: params?.protocolVersion ?? '2025-06-18',
         capabilities: { tools: {} },
-        serverInfo: { name: 'playwright-isolated', version: '0.4.0' },
+        serverInfo: { name: 'playwright-isolated', version: '0.5.0' },
       } });
     }
     if (method === 'tools/list') return send({ jsonrpc: '2.0', id, result: { tools: await listTools() } });

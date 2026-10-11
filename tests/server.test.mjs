@@ -1,36 +1,13 @@
 // Integration test: drives the playwright-isolated server over stdio like Claude Code does (needs Chrome and network).
 import { test, after } from 'node:test';
 import assert from 'node:assert/strict';
-import { spawn, execFileSync } from 'node:child_process';
-import readline from 'node:readline';
-import { fileURLToPath } from 'node:url';
+import { execFileSync } from 'node:child_process';
 import fs from 'node:fs';
-import os from 'node:os';
 import path from 'node:path';
+import { root, startServer } from './helpers.mjs';
 
-const root = fileURLToPath(new URL('../plugins/playwright-isolated/', import.meta.url));
-const scratch = fs.mkdtempSync(path.join(os.tmpdir(), 'pw-isolated-test-')); // the output root under test
-const srv = spawn(process.execPath, [`${root}server/server.mjs`], {
-  stdio: ['pipe', 'pipe', 'ignore'],
-  env: { ...process.env, PLAYWRIGHT_ISOLATED_OUTPUT_DIR: scratch },
-});
-const pending = new Map();
-let nextId = 1;
-readline.createInterface({ input: srv.stdout }).on('line', (l) => { const m = JSON.parse(l); pending.get(m.id)?.(m); });
-const rpc = (method, params) => new Promise((r) => { const id = nextId++; pending.set(id, r); srv.stdin.write(JSON.stringify({ jsonrpc: '2.0', id, method, params }) + '\n'); });
-const SESSION = `test-${process.pid}`;
-const call = async (agent, name, args = {}) => {
-  const r = (await rpc('tools/call', { name, arguments: agent ? { ...args, _agent: agent, _session: SESSION } : args })).result;
-  return { text: r.content.map((c) => c.text ?? '').join('\n'), isError: Boolean(r.isError) };
-};
-const exited = new Promise((r) => srv.on('exit', r));
-after(async () => {
-  srv.stdin.end();
-  await exited;
-  fs.rmSync(scratch, { recursive: true, force: true });
-});
-
-await rpc('initialize', { protocolVersion: '2025-06-18', capabilities: {}, clientInfo: { name: 'test', version: '0' } });
+const { rpc, call, stop, scratch, session: SESSION } = await startServer(); // scratch: the output root under test
+after(stop);
 
 test('engine tools are listed except browser_run_code_unsafe', async () => {
   const names = (await rpc('tools/list', {})).result.tools.map((t) => t.name);

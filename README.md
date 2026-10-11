@@ -8,8 +8,10 @@ The official `@playwright/mcp` engine (pinned `0.0.83`), wrapped so that it is s
 - **Cleanup.** `SubagentStop` closes the subagent's context (local named pipe). When Claude Code exits or crashes,
   the server's stdin closes and it closes the browser. If the server itself dies, Windows kills Chrome with it
   (Node keeps its children in a kill-on-close job).
-- **Limits.** Every call is capped at 60 s (a call over the limit is stopped by closing the agent's tabs; its
-  context with cookies, logins and cart stays); `browser_wait_for` time at 30 s; navigation timeout 45 s.
+- **Limits.** Every call is capped at 60 s; `browser_wait_for` time at 30 s; navigation timeout 45 s. A call over
+  the limit is no longer awaited (it may finish in the background) and the agent's tabs are checked: a tab that
+  responds is left as it is; a stuck page (busy JavaScript) gets its running script interrupted; only a tab that is
+  still stuck after that is closed. Cookies, logins and the agent's other tabs stay.
 - **Hidden tool.** `browser_run_code_unsafe` is not offered: it runs arbitrary code inside the server process
   ("RCE-equivalent" per its own description), where it could reach other agents' contexts and bypass the limits.
 
@@ -36,7 +38,10 @@ plugins/playwright-isolated/
   server/server.mjs, ipc.mjs  the server; control pipe name
   package.json                dependency: @playwright/mcp 0.0.83 (exact)
 tests/server.test.mjs         node --test tests/   (needs Chrome and network)
+tests/limit-*.test.mjs        the 60 s call limit: slow call let go, stuck page interrupted, stuck tab closed,
+                              other agents unaffected (about a minute each; node runs the files in parallel)
 tests/parity.test.mjs         same Chrome launch and browser properties as the official server (Windows)
+tests/helpers.mjs             shared: start the server over stdio, local test pages
 ```
 
 Not affiliated with Microsoft. The name follows the official server's `--isolated` (in-memory profile) and
